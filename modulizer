@@ -1,0 +1,37 @@
+#! /usr/bin/env perl
+use strict;
+use warnings;
+use JSON;
+use LWP::Simple;
+use File::Copy;
+use File::Path;
+use Data::Dumper;
+my $vendor = "./vendor";
+my $api_url = "http://api.metacpan.org/v0";
+my $dl_url = "http://api.metacpan.org/v0";
+
+install('Readonly');
+
+sub install {
+	my $module = shift;
+	my $version = shift;
+
+	print "User wants to install $module\n";
+	my $result = get("$api_url/release/$module");
+	if(!$result) {
+		die("Could not install $module as it does not exist on cpan");
+	}
+	my $json = from_json($result);
+	my $module_url = "$json->{download_url}";
+	my $module_tar = "$vendor/$json->{archive}";
+
+	getstore($module_url, $module_tar);
+
+	my $tar_result = `tar -zxf $module_tar $json->{name}/lib/ -C vendor`;
+	my @files = glob "./$json->{name}/lib/*";
+	for my $file (@files) {
+		move($file, $vendor) or die "The move operation failed for $file to $vendor: $!";
+	}
+	unlink $module_tar or warn "Could not unlink $module_tar: $!";
+	rmtree "./$json->{name}" or warn "Could not unlink $json->{name}: $!";
+}
