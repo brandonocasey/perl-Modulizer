@@ -6,32 +6,126 @@ use LWP::Simple;
 use File::Copy;
 use File::Path;
 use Data::Dumper;
-my $vendor = "./vendor";
-my $api_url = "http://api.metacpan.org/v0";
-my $dl_url = "http://api.metacpan.org/v0";
+my $vendor   = "./vendor";
+my $autoload = "./vendor/autoload.pm";
+my $tmp      = "./.module_tmp";
+my $api_url  = "http://api.metacpan.org/v0";
 
-install('Readonly');
+if(! -d "$vendor") {
+	mkdir "$vendor";
+}
+if(! -d "$tmp") {
+	mkdir "$tmp";
+}
+
+if(! -f "$autoload") {
+my $autoload_contents = '
+package autoload;
+use strict;
+use warnings;
+
+BEGIN {
+    my $package = __PACKAGE__;
+    my @authors = <./vendor/*>;
+    my @files;
+    while (@authors) {
+        my $author = shift @authors;
+        if($author ne "./vendor/autoload.pm") {
+            my @projects = <$author/*>;
+            while(@projects) {
+                my $project = shift @projects;
+                push(@files, <$project/lib/*>);
+            }
+        }
+    }
+
+    while(@files) {
+        my $file = shift @files;
+        if ( -d "$file" ) {
+            push(@files, <$file/*>);
+        } elsif ( $file =~ m/.*(\.pl|\.pm)$/ ) {
+			#print "Requiring $file\n";
+			require "$file";
+
+			open( my $fh => $file) or die "Cannot open $file: $!";
+
+			while(my $line = <$fh>) {
+				if($line =~ m/^package (.*);/) {
+					$1->import();
+					#print "With Class $1\n";
+				}
+			}
+			close($fh)
+        }
+    }
+
+}
+1;
+';
+
+	open(my $fh, '>', "$autoload") or die "Could not open file '$autoload' $!";
+	print $fh $autoload_contents;
+	close $fh;
+
+}
+
+my $arg = shift;
+if ($arg) {
+	install('Readonly');
+} else {
+	uninstall('Readonly');
+}
+
+rmtree "$tmp" or warn "Could not unlink $tmp: $!";
+
+
+sub get_module_data {
+	my $module = shift;
+	my $result = get("$api_url/release/$module");
+	if(!$result) {
+		die("Could get data for $module as it does not exist on cpan");
+	}
+	return from_json($result);
+}
 
 sub install {
 	my $module = shift;
 	my $version = shift;
 
-	print "User wants to install $module\n";
-	my $result = get("$api_url/release/$module");
-	if(!$result) {
-		die("Could not install $module as it does not exist on cpan");
-	}
-	my $json = from_json($result);
-	my $module_url = "$json->{download_url}";
-	my $module_tar = "$vendor/$json->{archive}";
+	# Get info
+	my $json = get_module_data($module);
 
-	getstore($module_url, $module_tar);
+	# Tar Save Location
+	my $tar = "$tmp/$json->{archive}";
 
-	my $tar_result = `tar -zxf $module_tar $json->{name}/lib/ -C vendor`;
-	my @files = glob "./$json->{name}/lib/*";
-	for my $file (@files) {
-		move($file, $vendor) or die "The move operation failed for $file to $vendor: $!";
+	# temp untar location
+	my $mtmp = "$tmp/$json->{name}";
+
+	getstore($json->{download_url}, $tar);
+
+	my $module_install_dir = "$vendor/$json->{author}";
+	if (! -d  "$module_install_dir") {
+		mkdir "$module_install_dir";
 	}
-	unlink $module_tar or warn "Could not unlink $module_tar: $!";
-	rmtree "./$json->{name}" or warn "Could not unlink $json->{name}: $!";
+
+	my $tar_result = `tar -zxvf "$tar" -C "$module_install_dir"`;
+	my $result_code = `echo "\$?"`;
+	chomp($result_code);
+	if($result_code ne "0") {
+		die("Tar for module $module appears to have failed with output $tar_result");
+	}
+	print "$module was installed Successfully!\n";
+}
+
+sub uninstall {
+	my $module = shift;
+	my $json = get_module_data($module);
+	my $author_dir = "$vendor/$json->{author}";
+	rmtree "$author_dir/$json->{name}" or die "Could not unlink $author_dir/$json->{name}: $!";
+
+	my @other_projects = <$author_dir/*>;
+	if(@other_projects eq "0") {
+		rmtree "$vendor/$json->{author}" or die "Could not unlink $vendor/$json->{author}: $!";
+	}
+	print "$module was uninstalled Successfully!\n";
 }

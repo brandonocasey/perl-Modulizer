@@ -12,6 +12,3 @@ use strict;
 use warnings;
 require 'vendor/autoload.pm';
 # Test our autoload.pm
-my $test_mode = "";
-$test_mod = test->new();
-$test_mod = Balls::Derp->new();
