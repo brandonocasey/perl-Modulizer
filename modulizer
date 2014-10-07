@@ -1,26 +1,188 @@
 #! /usr/bin/env perl
+package modulizer;
 use strict;
 use warnings;
+
 use JSON;
 use LWP::Simple;
 use File::Copy;
 use File::Path;
+use File::Basename;
 use Data::Dumper;
-my $vendor   = "./vendor";
-my $autoload = "./vendor/autoload.pm";
-my $tmp      = "./.module_tmp";
-my $api_url  = "http://api.metacpan.org/v0";
+use Getopt::Long qw(:config no_auto_abbrev);
 
-if(! -d "$vendor") {
-	mkdir "$vendor";
-}
-if(! -d "$tmp") {
-	mkdir "$tmp";
+
+if(!caller()) {
+	__PACKAGE__->run(@ARGV);
+	exit 0;
 }
 
-if(! -f "$autoload") {
-my $autoload_contents = '
-package autoload;
+sub usage {
+	my $self = shift;
+	print ""
+	."\n"
+	."    ./" . basename($0) . " <options>\n"
+	."\n"
+	."    --help       show this help\n"
+	."    --install    install a module\n"
+	."    --uninstall  uninstall a module\n"
+	."    --update     update all modules\n"
+	."    --dump_auto  write the autoload file\n"
+	."    --init       run through config setup\n"
+	."\n";
+
+	exit 0;
+}
+sub run {
+	my $class = shift;
+	my $self = {
+		'config'    => "./modules.json",
+		'vendor'    => "./vendor",
+		'autoload'  => "./vendor/autoload.pm",
+		'api'       => "http://api.metacpan.org/v0",
+		'tmp'       => "/.module_tmp",
+		'install'   => [],
+		'uninstall' => [],
+	};
+	bless($self, $class);
+	$self->setup($self->{vendor}, $self->{config}, $self->{autoload}, $self->{tmp});
+
+	my $ret = GetOptions(
+		"install:s"   => sub { $self->install($self->{api}, ); },
+		"uninstall:s" => sub { $self->uninstall($self->{api}); },
+		"dump_auto"   => sub { $self->write_autoload($self->{autoload}) },
+		"update"      => sub { $self->usage(); },
+		"init"        => sub { $self->init_config($self->{config}); },
+		"update"      => sub { $self->update(); },
+	);
+
+	if(!$ret) {
+		error("Incorrect/Invalid options passed in were passed in");
+	}
+
+	# cleanup
+	rmtree $self->{tmp} or warn "Could not unlink $self->{tmp}: $!";
+	return $self;
+}
+
+sub setup {
+	my $self     = shift;
+	my $vendor   = shift;
+	my $config   = shift;
+	my $autoload = shift;
+	my $tmp      = shift;
+
+	if(! -f $config) {
+		$self->init_config($config);
+	} else {
+		# read config
+	}
+	if(! -d $vendor) {
+		mkdir $vendor;
+	}
+	if(! -d $tmp) {
+		mkdir $tmp;
+	}
+
+	if(! -f $autoload) {
+		$self->write_autoload($autoload);
+	}
+}
+
+sub init_config {
+	my $self   = shift;
+	my $config = shift;
+	if( -f $config ) {
+		# ask if they want to overwrite
+	}
+
+	# name
+	# version
+}
+
+sub read_config {
+	my $self   = shift;
+	my $config = shift;
+	local $/ = undef;
+	open(my $fh, '>', "$config") or die "Could not open file '$config' $!";
+	my $raw_json = <$fh>;
+	close($fh);
+
+	my $json = to_json($raw_json);
+	return $json;
+}
+
+
+
+sub error {
+	my $self = shift;
+	while(@_) {
+		my $msg = shift;
+		print STDERR "Error: $msg\n";
+	}
+	exit 1;
+}
+
+
+# Get the modules JSON data from the api
+sub get_module_data {
+	my $self = shift;
+	my $api = shift;
+	my $module = shift;
+	my $result = get("$api/release/$module");
+	if(!$result) {
+		$self->error("Could get data for $module as it does not exist on cpan");
+	}
+	return from_json($result);
+}
+
+sub install {
+	my $module = shift;
+	my $version = shift;
+
+	# Get info
+	my $json = get_module_data($module);
+
+	# Tar Save Location
+	my $tar = "$args->{tmp}/$json->{archive}";
+
+	# temp untar location
+	my $mtmp = "$args->{tmp}/$json->{name}";
+
+	getstore($json->{download_url}, $tar);
+
+	my $module_install_dir = "$args->{vendor}/$json->{author}";
+	if (! -d  "$module_install_dir") {
+		mkdir "$module_install_dir";
+	}
+
+	my $tar_result = `tar -zxvf "$tar" -C "$module_install_dir"`;
+	my $result_code = `echo "\$?"`;
+	chomp($result_code);
+	if($result_code ne "0") {
+		die("Tar for module $module appears to have failed with output $tar_result");
+	}
+	print "$module was installed Successfully!\n";
+}
+
+sub uninstall {
+	my $module = shift;
+	my $json = get_module_data($module);
+	my $author_dir = "$args->{vendor}/$json->{author}";
+	rmtree "$author_dir/$json->{name}" or die "Could not unlink $author_dir/$json->{name}: $!";
+
+	my @other_projects = <$author_dir/*>;
+	if(@other_projects eq "0") {
+		rmtree "$args->{vendor}/$json->{author}" or die "Could not unlink $args->{vendor}/$json->{author}: $!";
+	}
+	print "$module was uninstalled Successfully!\n";
+}
+
+sub write_autoload {
+	my $self = shift;
+	my $autoload = shift;
+	my $autoload_contents =
+'package autoload;
 use strict;
 use warnings;
 
@@ -58,74 +220,12 @@ BEGIN {
 			close($fh)
         }
     }
-
 }
-1;
-';
+1;';
 
 	open(my $fh, '>', "$autoload") or die "Could not open file '$autoload' $!";
 	print $fh $autoload_contents;
 	close $fh;
-
 }
 
-my $arg = shift;
-if ($arg) {
-	install('Readonly');
-} else {
-	uninstall('Readonly');
-}
-
-rmtree "$tmp" or warn "Could not unlink $tmp: $!";
-
-
-sub get_module_data {
-	my $module = shift;
-	my $result = get("$api_url/release/$module");
-	if(!$result) {
-		die("Could get data for $module as it does not exist on cpan");
-	}
-	return from_json($result);
-}
-
-sub install {
-	my $module = shift;
-	my $version = shift;
-
-	# Get info
-	my $json = get_module_data($module);
-
-	# Tar Save Location
-	my $tar = "$tmp/$json->{archive}";
-
-	# temp untar location
-	my $mtmp = "$tmp/$json->{name}";
-
-	getstore($json->{download_url}, $tar);
-
-	my $module_install_dir = "$vendor/$json->{author}";
-	if (! -d  "$module_install_dir") {
-		mkdir "$module_install_dir";
-	}
-
-	my $tar_result = `tar -zxvf "$tar" -C "$module_install_dir"`;
-	my $result_code = `echo "\$?"`;
-	chomp($result_code);
-	if($result_code ne "0") {
-		die("Tar for module $module appears to have failed with output $tar_result");
-	}
-	print "$module was installed Successfully!\n";
-}
-
-sub uninstall {
-	my $module = shift;
-	my $json = get_module_data($module);
-	my $author_dir = "$vendor/$json->{author}";
-	rmtree "$author_dir/$json->{name}" or die "Could not unlink $author_dir/$json->{name}: $!";
-
-	my @other_projects = <$author_dir/*>;
-	if(@other_projects eq "0") {
-		rmtree "$vendor/$json->{author}" or die "Could not unlink $vendor/$json->{author}: $!";
-	}
-	print "$module was uninstalled Successfully!\n";
-}
+1;
