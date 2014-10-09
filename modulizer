@@ -10,10 +10,11 @@ use File::Path;
 use File::Basename;
 use Data::Dumper;
 use Getopt::Long qw(:config no_auto_abbrev);
+use Cwd qw(abs_path);
 
 
 if(!caller()) {
-	__PACKAGE__->run(@ARGV);
+	__PACKAGE__->run();
 	exit 0;
 }
 
@@ -27,10 +28,9 @@ sub usage {
 	."    --install    install a module\n"
 	."    --uninstall  uninstall a module\n"
 	."    --update     update all modules\n"
-	."    --dump_auto  write the autoload file\n"
+	."    --dump_auto  write the autoload file to vendor\n"
 	."    --init       run through config setup\n"
 	."\n";
-
 	exit 0;
 }
 sub run {
@@ -40,75 +40,150 @@ sub run {
 		'vendor'    => "./vendor",
 		'autoload'  => "./vendor/autoload.pm",
 		'api'       => "http://api.metacpan.org/v0",
-		'tmp'       => "/.module_tmp",
+		'tmp'       => "./.module_tmp",
 		'install'   => [],
 		'uninstall' => [],
+		'save'      => undef,
 	};
 	bless($self, $class);
-	$self->setup($self->{vendor}, $self->{config}, $self->{autoload}, $self->{tmp});
 
-	my $ret = GetOptions(
-		"install:s"   => sub { $self->install($self->{api}, ); },
-		"uninstall:s" => sub { $self->uninstall($self->{api}); },
-		"dump_auto"   => sub { $self->write_autoload($self->{autoload}) },
-		"update"      => sub { $self->usage(); },
-		"init"        => sub { $self->init_config($self->{config}); },
-		"update"      => sub { $self->update(); },
-	);
+	GetOptions(
+		"install:s"   => $self->{install},
+		"uninstall:s" => $self->{uninstall},
+		"dump"        => sub { $self->setup(); $self->write_autoload($self->{autoload}); $self->cleanup(); },
+		"help"        => sub { $self->usage(); },
+		"init"        => sub { $self->init_config($self->{config}); $self->cleanup(); },
+		"update"      => sub { $self->setup(); $self->update(); $self->cleanup(); },
+		"save"        => \$self->{save},
+	) or $self->error("Incorrect/Invalid options passed");
+	$self->setup();
 
-	if(!$ret) {
-		error("Incorrect/Invalid options passed in were passed in");
+	print Dumper($self);
+	if(@{$self->{install}}) {
+		foreach my $install (@{$self->{install}}) {
+			if($install) {
+				$self->install($install);
+			}
+		}
+	} elsif (@{$self->{uninstall}}) {
+		foreach my $uninstall (@{$self->{uninstall}}) {
+			if($uninstall) {
+				$self->uninstall($uninstall);
+			}
+		}
+	} else {
+		$self->error("Must Select an action --help for help");
+
 	}
 
-	# cleanup
-	rmtree $self->{tmp} or warn "Could not unlink $self->{tmp}: $!";
+	$self->cleanup();
 	return $self;
 }
 
+sub cleanup {
+	my $self = shift;
+	my @caller = caller(1);
+	rmtree $self->{tmp} or $self->error("Unable to remove $self->{tmp}: $!");
+	exit 0;
+}
+
+sub update {
+	my $self = shift;
+	my $config = $self->read_config();
+	while( my ($module, $version) = each (%{$config->{require}}) ) {
+		$self->install($module, $version);
+	}
+}
+
 sub setup {
-	my $self     = shift;
-	my $vendor   = shift;
-	my $config   = shift;
-	my $autoload = shift;
-	my $tmp      = shift;
+	my $self = shift;
 
-	if(! -f $config) {
-		$self->init_config($config);
+	if(! -f $self->{config} or ! -s $self->{config}) {
+		$self->error("Config file does not exist or is empty, use --init");
 	} else {
-		# read config
-	}
-	if(! -d $vendor) {
-		mkdir $vendor;
-	}
-	if(! -d $tmp) {
-		mkdir $tmp;
 	}
 
-	if(! -f $autoload) {
-		$self->write_autoload($autoload);
+	if(! -d "$self->{vendor}") {
+		mkdir $self->{vendor} or $self->error("Unable to create $self->{vendor}: $!");
+	}
+	if(! -d "$self->{tmp}") {
+		mkdir $self->{tmp} or $self->error("Unable to create $self->{tmp}: $!");
+	}
+
+	if(! -f $self->{autoload}) {
+		$self->write_autoload();
 	}
 }
 
 sub init_config {
 	my $self   = shift;
-	my $config = shift;
-	if( -f $config ) {
-		# ask if they want to overwrite
+	my $config = {};
+	$config->{name}    = basename(dirname(abs_path($0)));
+	$config->{version} = '1.0.0';
+	$config->{require} = {};
+	if( -f $self->{config} and -s $self->{config}) {
+		if($self->_ask("Do you want to overwrite your current config", "no|n|yes|y") =~ m/no?/i) {
+			return;
+		}
+		$config = $self->read_config();
 	}
 
-	# name
-	# version
+	$config->{name} = $self->_ask("What is your module name", "$config->{name}|.*");
+	$config->{version} = $self->_ask("What is your modules version", $config->{version} . '|\d{1,3}\.\d{1,3}\.\d{1,3}');
+
+	# TODO:
+	# Do you want to keep modules/ask about modules?
+	my $json = JSON->new();
+	$json = $json->sort_by(sub { $JSON::PP::a cmp $JSON::PP::b })->pretty->encode($config);
+
+	if($self->_ask("$json\nDoes this look Correct", "yes|y|no|n") =~ m/^no?$/i) {
+		$self->init_config();
+		return;
+	}
+	$self->write_config($config);
+
+}
+
+sub write_config {
+	my $self = shift;
+	my $hash = shift;
+	my $json = JSON->new();
+	$json = $json->sort_by(sub { $JSON::PP::a cmp $JSON::PP::b })->pretty->encode($hash);
+	open(my $fh, '>'. "$self->{config}");
+	print $fh "$json";
+	close($fh);
+}
+
+sub _ask {
+	my $self = shift;
+	my $question = shift;
+	my @answers = split(m/\|/, shift);
+	my $answer;
+
+	# do while So we can have an undef default and allow .*
+	do {
+		print "$question? [$answers[0]] ";
+		$answer = <>;
+		chomp($answer);
+	} while($answer ne "" and ! grep $answer =~ m/^$_$/, @answers);
+
+
+	# default is first answer
+	if($answer eq "") {
+		$answer = $answers[0];
+	}
+
+	return $answer;
 }
 
 sub read_config {
 	my $self   = shift;
-	my $config = shift;
 	local $/ = undef;
-	open(my $fh, '>', "$config") or die "Could not open file '$config' $!";
+	open(my $fh, '<', "$self->{config}") or $self->error("Could not open file '$self->{config}' $!");
 	my $raw_json = <$fh>;
 	close($fh);
 
-	my $json = to_json($raw_json);
+	my $json = from_json($raw_json);
 	return $json;
 }
 
@@ -127,9 +202,9 @@ sub error {
 # Get the modules JSON data from the api
 sub get_module_data {
 	my $self = shift;
-	my $api = shift;
 	my $module = shift;
-	my $result = get("$api/release/$module");
+	$module =~ s/::/-/g;
+	my $result = get("$self->{api}/release/$module");
 	if(!$result) {
 		$self->error("Could get data for $module as it does not exist on cpan");
 	}
@@ -137,21 +212,23 @@ sub get_module_data {
 }
 
 sub install {
+	my $self = shift;
 	my $module = shift;
 	my $version = shift;
 
 	# Get info
-	my $json = get_module_data($module);
+	my $json = $self->get_module_data($module);
+	#print Dumper($json);
 
 	# Tar Save Location
-	my $tar = "$args->{tmp}/$json->{archive}";
+	my $tar = "$self->{tmp}/$json->{archive}";
 
 	# temp untar location
-	my $mtmp = "$args->{tmp}/$json->{name}";
+	my $mtmp = "$self->{tmp}/$json->{name}";
 
 	getstore($json->{download_url}, $tar);
 
-	my $module_install_dir = "$args->{vendor}/$json->{author}";
+	my $module_install_dir = "$self->{vendor}/$json->{author}";
 	if (! -d  "$module_install_dir") {
 		mkdir "$module_install_dir";
 	}
@@ -163,24 +240,39 @@ sub install {
 		die("Tar for module $module appears to have failed with output $tar_result");
 	}
 	print "$module was installed Successfully!\n";
+	if($self->{save}) {
+		my $config = $self->read_config();
+		if(!$config->{require}->{"$module"}) {
+			$config->{require}->{"$module"} = $json->{version};
+			$self->write_config($config);
+		}
+	}
 }
 
 sub uninstall {
+	my $self = shift;
 	my $module = shift;
-	my $json = get_module_data($module);
-	my $author_dir = "$args->{vendor}/$json->{author}";
+	my $json = $self->get_module_data($module);
+	my $author_dir = "$self->{vendor}/$json->{author}";
 	rmtree "$author_dir/$json->{name}" or die "Could not unlink $author_dir/$json->{name}: $!";
 
 	my @other_projects = <$author_dir/*>;
 	if(@other_projects eq "0") {
-		rmtree "$args->{vendor}/$json->{author}" or die "Could not unlink $args->{vendor}/$json->{author}: $!";
+		rmtree "$self->{vendor}/$json->{author}" or die "Could not unlink $self->{vendor}/$json->{author}: $!";
 	}
 	print "$module was uninstalled Successfully!\n";
+	if($self->{save}) {
+		my $config = $self->read_config();
+		if($config->{require}->{"$module"}) {
+			delete($config->{require}->{"$module"});
+			$self->write_config($config);
+		}
+	}
+
 }
 
 sub write_autoload {
 	my $self = shift;
-	my $autoload = shift;
 	my $autoload_contents =
 'package autoload;
 use strict;
@@ -223,7 +315,7 @@ BEGIN {
 }
 1;';
 
-	open(my $fh, '>', "$autoload") or die "Could not open file '$autoload' $!";
+	open(my $fh, '>', "$self->{autoload}") or die "Could not open file '$self->{autoload}' $!";
 	print $fh $autoload_contents;
 	close $fh;
 }
